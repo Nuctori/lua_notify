@@ -1,0 +1,20 @@
+[package]
+name = "lua_notify"
+version = "0.1.0"
+edition = "2021"
+description = "Lua bindings for notify (cross-platform file system notifications)"
+license = "MIT"
+repository = "https://github.com/Nuctori/lua_notify"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mlua = { version = "0.12", features = ["lua54", "module"] }
+notify = "8"
+
+[dev-dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+pkg-config = "0.3"
