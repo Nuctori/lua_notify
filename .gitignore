@@ -4,3 +4,4 @@
 *.dylib
 dist/
 /mutants.out*
+/.accord/

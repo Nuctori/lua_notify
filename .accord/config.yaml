@@ -1,7 +1,0 @@
-# Accord 系统配置
-scan_interval_sec: 60
-max_concurrent: 1
-autopilot: true
-executor: auto
-cli_command: auto
-project_id: lua-notify
