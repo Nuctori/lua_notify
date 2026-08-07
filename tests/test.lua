@@ -18,10 +18,11 @@ local notify = require("lua_notify")
 assert_eq(type(notify), "table", "module must load")
 
 -- temp dir (real filesystem, platform-independent)
-local dir = os.tmpname() .. ".d"
-os.remove(dir)
+-- os.tmpname on Windows lands on the drive root; build an independent dir
+-- under the system temp instead.
+local dir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
+dir = dir .. "/lua_notify_test_" .. os.time() .. "_" .. math.random(10000)
 os.execute('mkdir "' .. dir .. '"')
--- normalize: Lua on Windows sees backslashes in os.tmpname; use forward
 dir = dir:gsub("\\", "/")
 
 local function kinds_since(w, wait)
@@ -36,6 +37,16 @@ end
 
 local function contains(t, v)
   for _, x in ipairs(t) do if x == v then return true end end
+  return false
+end
+
+-- 事件 kind 前缀匹配：Windows RDCW 发 "create"/"modify"/"remove"（Any），
+-- Linux inotify 发 "create/file"/"modify/data"/"remove/file"，macOS FSEvents 发
+-- "modify/rename"（无 from/to）。断言用前缀兼容三平台。
+local function contains_prefix(t, prefix)
+  for _, x in ipairs(t) do
+    if x == prefix or x:sub(1, #prefix + 1) == prefix .. "/" then return true end
+  end
   return false
 end
 
@@ -54,11 +65,11 @@ os.rename(dir .. "/a.txt", dir .. "/b.txt")
 os.remove(dir .. "/b.txt")
 
 local kinds = kinds_since(w)
-assert_true(contains(kinds, "create"), "create event kind; got " .. table.concat(kinds, ","))
-assert_true(contains(kinds, "modify"), "modify event kind")
-assert_true(contains(kinds, "modify/rename/from"), "rename/from kind")
-assert_true(contains(kinds, "modify/rename/to"), "rename/to kind")
-assert_true(contains(kinds, "remove"), "remove event kind")
+assert_true(contains_prefix(kinds, "create"), "create event kind; got " .. table.concat(kinds, ","))
+assert_true(contains_prefix(kinds, "modify"), "modify event kind")
+assert_true(contains_prefix(kinds, "modify/rename/from") or contains_prefix(kinds, "modify/rename"),
+            "rename kind (from/to on Windows/Linux, any on macOS); got " .. table.concat(kinds, ","))
+assert_true(contains_prefix(kinds, "remove"), "remove event kind")
 
 -- event rows carry kind + paths (array of strings, 1-based)
 local events = w:poll()

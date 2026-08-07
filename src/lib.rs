@@ -11,7 +11,7 @@
 //! (no cross-thread Lua calls) and fits Lua's synchronous model.
 
 use mlua::prelude::*;
-use notify::{Event, EventKind, RecursiveMode, RecommendedWatcher, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::{channel, Receiver};
 
 struct LuaWatcher {
@@ -21,25 +21,24 @@ struct LuaWatcher {
 
 impl mlua::UserData for LuaWatcher {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("watch", |_, this, (path, recursive): (String, Option<bool>)| {
-            let mode = if recursive.unwrap_or(false) {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            this.watcher
-                .watch(std::path::Path::new(&path), mode)
-                .map_err(|e| {
-                    mlua::Error::runtime(format!("lua_notify: watch failed: {e}"))
-                })
-        });
+        methods.add_method_mut(
+            "watch",
+            |_, this, (path, recursive): (String, Option<bool>)| {
+                let mode = if recursive.unwrap_or(false) {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                this.watcher
+                    .watch(std::path::Path::new(&path), mode)
+                    .map_err(|e| mlua::Error::runtime(format!("lua_notify: watch failed: {e}")))
+            },
+        );
 
         methods.add_method_mut("unwatch", |_, this, path: String| {
             this.watcher
                 .unwatch(std::path::Path::new(&path))
-                .map_err(|e| {
-                    mlua::Error::runtime(format!("lua_notify: unwatch failed: {e}"))
-                })
+                .map_err(|e| mlua::Error::runtime(format!("lua_notify: unwatch failed: {e}")))
         });
 
         // poll() 非阻塞取事件：有事件返回数组，无事件返回 nil。
@@ -60,7 +59,8 @@ impl mlua::UserData for LuaWatcher {
 
         // poll_wait(sec) 阻塞等待至多 sec 秒取一个事件（适合周期性轮询循环）。
         methods.add_method("poll_wait", |lua, this, sec: f64| {
-            let dur = std::time::Duration::from_secs_f64(sec.max(0.0));
+            let dur = std::time::Duration::try_from_secs_f64(sec.max(0.0))
+                .map_err(|_| mlua::Error::runtime("lua_notify: invalid poll_wait seconds"))?;
             match this.rx.recv_timeout(dur) {
                 Ok(ev) => Ok(mlua::Value::Table(event_row(lua, &ev)?)),
                 Err(_) => Ok(mlua::Value::Nil),
@@ -82,56 +82,95 @@ fn event_row(lua: &Lua, ev: &Event) -> LuaResult<LuaTable> {
 }
 
 /// EventKind 树形枚举 → 稳定 Lua 字符串（如 "create/file"、"modify/data"）。
+///
+/// 按子树拆分为浅层辅助函数（见下方 `*_kind_str`），保持每个 match 的
+/// 认知复杂度在阈值以下；映射表由 `#[cfg(test)]` 单测锁定，重构不得
+/// 改变任何已发布字符串。
 fn event_kind_str(kind: &EventKind) -> &'static str {
     use notify::event::*;
     match kind {
         EventKind::Any => "any",
-        EventKind::Access(k) => match k {
-            AccessKind::Any => "access",
-            AccessKind::Read => "access/read",
-            AccessKind::Open(_) => "access/open",
-            AccessKind::Close(_) => "access/close",
-            AccessKind::Other => "access/other",
-        },
-        EventKind::Create(k) => match k {
-            CreateKind::Any => "create",
-            CreateKind::File => "create/file",
-            CreateKind::Folder => "create/folder",
-            CreateKind::Other => "create/other",
-        },
-        EventKind::Modify(k) => match k {
-            ModifyKind::Any => "modify",
-            ModifyKind::Data(d) => match d {
-                DataChange::Any => "modify/data",
-                DataChange::Size => "modify/data/size",
-                DataChange::Content => "modify/data/content",
-                DataChange::Other => "modify/data/other",
-            },
-            ModifyKind::Metadata(m) => match m {
-                MetadataKind::Any => "modify/metadata",
-                MetadataKind::AccessTime => "modify/metadata/access_time",
-                MetadataKind::WriteTime => "modify/metadata/write_time",
-                MetadataKind::Permissions => "modify/metadata/permissions",
-                MetadataKind::Ownership => "modify/metadata/ownership",
-                MetadataKind::Extended => "modify/metadata/extended",
-                MetadataKind::Other => "modify/metadata/other",
-            },
-            ModifyKind::Name(r) => match r {
-                RenameMode::Any => "modify/rename",
-                RenameMode::To => "modify/rename/to",
-                RenameMode::From => "modify/rename/from",
-                RenameMode::Both => "modify/rename/both",
-                RenameMode::Other => "modify/rename/other",
-            },
-            ModifyKind::Other => "modify/other",
-        },
-        EventKind::Remove(k) => match k {
-            RemoveKind::Any => "remove",
-            RemoveKind::File => "remove/file",
-            RemoveKind::Folder => "remove/folder",
-            RemoveKind::Other => "remove/other",
-        },
+        EventKind::Access(k) => access_kind_str(k),
+        EventKind::Create(k) => create_kind_str(k),
+        EventKind::Modify(k) => modify_kind_str(k),
+        EventKind::Remove(k) => remove_kind_str(k),
         EventKind::Other => "other",
+    }
+}
+
+fn access_kind_str(k: &notify::event::AccessKind) -> &'static str {
+    use notify::event::AccessKind::*;
+    match k {
+        Any => "access",
+        Read => "access/read",
+        Open(_) => "access/open",
+        Close(_) => "access/close",
+        Other => "access/other",
+    }
+}
+
+fn create_kind_str(k: &notify::event::CreateKind) -> &'static str {
+    use notify::event::CreateKind::*;
+    match k {
+        Any => "create",
+        File => "create/file",
+        Folder => "create/folder",
+        Other => "create/other",
+    }
+}
+
+fn modify_kind_str(k: &notify::event::ModifyKind) -> &'static str {
+    use notify::event::ModifyKind::*;
+    match k {
+        Any => "modify",
+        Data(d) => data_change_str(d),
+        Metadata(m) => metadata_kind_str(m),
+        Name(r) => rename_mode_str(r),
+        Other => "modify/other",
+    }
+}
+
+fn data_change_str(d: &notify::event::DataChange) -> &'static str {
+    use notify::event::DataChange::*;
+    match d {
+        Any => "modify/data",
+        Size => "modify/data/size",
+        Content => "modify/data/content",
+        Other => "modify/data/other",
+    }
+}
+
+fn metadata_kind_str(m: &notify::event::MetadataKind) -> &'static str {
+    use notify::event::MetadataKind::*;
+    match m {
+        Any => "modify/metadata",
+        AccessTime => "modify/metadata/access_time",
+        WriteTime => "modify/metadata/write_time",
+        Permissions => "modify/metadata/permissions",
+        Ownership => "modify/metadata/ownership",
+        Extended => "modify/metadata/extended",
+        Other => "modify/metadata/other",
+    }
+}
+
+fn rename_mode_str(r: &notify::event::RenameMode) -> &'static str {
+    use notify::event::RenameMode::*;
+    match r {
+        Any => "modify/rename",
+        To => "modify/rename/to",
+        From => "modify/rename/from",
+        Both => "modify/rename/both",
+        Other => "modify/rename/other",
+    }
+}
+
+fn remove_kind_str(k: &notify::event::RemoveKind) -> &'static str {
+    use notify::event::RemoveKind::*;
+    match k {
+        Any => "remove",
+        File => "remove/file",
+        Folder => "remove/folder",
+        Other => "remove/other",
     }
 }
 
@@ -157,4 +196,120 @@ fn lua_notify(lua: &Lua) -> LuaResult<LuaTable> {
     exports.set("new", new)?;
 
     Ok(exports)
+}
+
+// ---------------------------------------------------------------------------
+// unit tests: kind-string mapping is a stable public API (README documents
+// the strings), so the full table is locked here and must not change.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::event_kind_str;
+    use notify::event::*;
+
+    #[test]
+    fn kind_strings_match_documented_api() {
+        let cases: Vec<(EventKind, &'static str)> = vec![
+            (EventKind::Any, "any"),
+            (EventKind::Other, "other"),
+            // access
+            (EventKind::Access(AccessKind::Any), "access"),
+            (EventKind::Access(AccessKind::Read), "access/read"),
+            (
+                EventKind::Access(AccessKind::Open(AccessMode::Read)),
+                "access/open",
+            ),
+            (
+                EventKind::Access(AccessKind::Close(AccessMode::Write)),
+                "access/close",
+            ),
+            (EventKind::Access(AccessKind::Other), "access/other"),
+            // create
+            (EventKind::Create(CreateKind::Any), "create"),
+            (EventKind::Create(CreateKind::File), "create/file"),
+            (EventKind::Create(CreateKind::Folder), "create/folder"),
+            (EventKind::Create(CreateKind::Other), "create/other"),
+            // modify
+            (EventKind::Modify(ModifyKind::Any), "modify"),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                "modify/data",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Size)),
+                "modify/data/size",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                "modify/data/content",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Other)),
+                "modify/data/other",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+                "modify/metadata",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+                "modify/metadata/access_time",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+                "modify/metadata/write_time",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+                "modify/metadata/permissions",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Ownership)),
+                "modify/metadata/ownership",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)),
+                "modify/metadata/extended",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Other)),
+                "modify/metadata/other",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+                "modify/rename",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+                "modify/rename/to",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                "modify/rename/from",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                "modify/rename/both",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::Other)),
+                "modify/rename/other",
+            ),
+            (EventKind::Modify(ModifyKind::Other), "modify/other"),
+            // remove
+            (EventKind::Remove(RemoveKind::Any), "remove"),
+            (EventKind::Remove(RemoveKind::File), "remove/file"),
+            (EventKind::Remove(RemoveKind::Folder), "remove/folder"),
+            (EventKind::Remove(RemoveKind::Other), "remove/other"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                event_kind_str(&kind),
+                expected,
+                "event_kind_str({kind:?}) must stay \"{expected}\""
+            );
+        }
+    }
 }
